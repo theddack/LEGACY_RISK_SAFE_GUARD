@@ -6,7 +6,7 @@ class RiskCalculator
      * IR을 받아 Risk 점수 계산
      * 가중치는 config에서 불러온다.
      */
-    public function calculate(array $ir): array
+    public function calculate(array $ir)
     {
         $weights = require __DIR__ . '/../config/risk_weights.php';
 
@@ -25,7 +25,7 @@ class RiskCalculator
         ];
     }
 
-    private function level(float $score): string
+    private function level($score)
     {
         if ($score <= 3) return "LOW";
         if ($score <= 6) return "MEDIUM";

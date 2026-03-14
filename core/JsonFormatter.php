@@ -2,7 +2,7 @@
 
 class JsonFormatter
 {
-    public function format(array $ir, array $riskData, array $explanation): string
+    public function format(array $ir, array $riskData, array $explanation)
     {
         return json_encode([
             "ir" => $ir,

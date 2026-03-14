@@ -2,14 +2,14 @@
 
 class ReportFormatter
 {
-    private bool $useColor;
+    private $useColor;
 
-    public function __construct(bool $useColor = false)
+    public function __construct($useColor = false)
     {
         $this->useColor = $useColor;
     }
 
-    public function format(array $ir, array $riskData, array $explanation): string
+    public function format(array $ir, array $riskData, array $explanation)
     {
         $m = $ir['metrics'];
 
@@ -70,6 +70,17 @@ class ReportFormatter
             $output .= "\n";
         }
 
+        if (!empty($explanation['risk_reasons'])) {
+            $output .= "----------------------------------------\n";
+            $output .= "[위험 사유]\n\n";
+
+            foreach ($explanation['risk_reasons'] as $reason) {
+                $output .= "  - {$reason}\n";
+            }
+
+            $output .= "\n";
+        }
+
         $output .= "----------------------------------------\n";
         $output .= "[요약]\n\n";
         $output .= "{$explanation['summary']}\n\n";
@@ -82,7 +93,7 @@ class ReportFormatter
     /**
      * 위험 등급 색상 처리
      */
-    private function colorRiskLevel(string $level): string
+    private function colorRiskLevel($level)
     {
         if (!$this->useColor) {
             return $level;

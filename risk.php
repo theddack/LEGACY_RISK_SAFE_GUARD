@@ -16,10 +16,11 @@ if (!isset($options['lang'], $options['root'], $options['file'], $options['forma
     exit(3); // 잘못된 옵션
 }
 
-$lang   = $options['lang'];
-$root   = $options['root'];
-$file   = $options['file'];
-$format = $options['format'];
+$lang     = $options['lang'];
+$root     = $options['root'];
+$file     = $options['file'];
+$format   = $options['format'];
+$useColor = isset($options['color']);
 
 // -----------------------------
 // Analyzer 선택 (현재는 PHP만)
