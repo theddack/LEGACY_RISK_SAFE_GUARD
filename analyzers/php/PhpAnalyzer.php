@@ -69,7 +69,9 @@ class PhpAnalyzer
             );
         }
 
-        $relatedFiles = $this->buildRelatedFiles($relativeInbound, $relativeSameTable);
+        $relatedFilesAnalysis = $this->buildRelatedFiles($relativeInbound, $relativeSameTable);
+        $relatedFiles = $relatedFilesAnalysis['files'];
+        $relatedFileDetails = $relatedFilesAnalysis['details'];
 
         return [
             "schema_version" => "1.0",
@@ -92,8 +94,9 @@ class PhpAnalyzer
                     "query_type_counts" => $queryTypeCounts,
                     "query_locations"   => $queryLocations,
                     "table_query_map"   => $tableQueryMap,
-                    "same_table_users"  => $relativeSameTable,
-                    "related_files"     => $relatedFiles
+                    "same_table_users"   => $relativeSameTable,
+                    "related_files"      => $relatedFiles,
+                    "related_file_details" => $relatedFileDetails
                 ],
                 "globals" => [
                     "count" => $globalCount
@@ -179,14 +182,7 @@ class PhpAnalyzer
         return count($matches[0]);
     }
 
-    /**
-     * SQL 쿼리 키워드 개수 계산 (주석 제거 후 content 사용)
-     */
-    private function calculateQueryCount($cleanContent)
-    {
-        preg_match_all('/\b(SELECT|INSERT|UPDATE|DELETE)\b/i', $cleanContent, $matches);
-        return count($matches[0]);
-    }
+
 
     /**
      * SQL 테이블 이름 추출 (주석 제거 후 content 사용)
@@ -472,20 +468,60 @@ class PhpAnalyzer
 
     /**
      * inbound + same-table 정보를 묶어 related_files를 추론한다.
+     * 각 파일에 대해 source/score를 함께 제공해 신뢰도 기반 탐색이 가능하다.
      */
     private function buildRelatedFiles(array $relativeInbound, array $relativeSameTable)
     {
-        $related = $relativeInbound;
+        $scores = [];
 
-        foreach ($relativeSameTable as $files) {
-            $related = array_merge($related, $files);
+        foreach ($relativeInbound as $file) {
+            if (!isset($scores[$file])) {
+                $scores[$file] = ['path' => $file, 'score' => 0, 'sources' => []];
+            }
+            $scores[$file]['score'] += 3;
+            $scores[$file]['sources']['inbound'] = true;
         }
 
-        $related = array_values(array_unique($related));
-        sort($related);
+        foreach ($relativeSameTable as $table => $files) {
+            foreach ($files as $file) {
+                if (!isset($scores[$file])) {
+                    $scores[$file] = ['path' => $file, 'score' => 0, 'sources' => []];
+                }
+                $scores[$file]['score'] += 1;
+                $scores[$file]['sources']['same_table:' . $table] = true;
+            }
+        }
 
-        return $related;
+        $details = array_values($scores);
+        usort($details, function ($a, $b) {
+            if ($a['score'] === $b['score']) {
+                return strcmp($a['path'], $b['path']);
+            }
+            return $b['score'] - $a['score'];
+        });
+
+        foreach ($details as &$item) {
+            $item['sources'] = array_values(array_keys($item['sources']));
+            if ($item['score'] >= 3) {
+                $item['confidence'] = 'HIGH';
+            } elseif ($item['score'] >= 2) {
+                $item['confidence'] = 'MEDIUM';
+            } else {
+                $item['confidence'] = 'LOW';
+            }
+        }
+        unset($item);
+
+        $files = array_map(function ($item) {
+            return $item['path'];
+        }, $details);
+
+        return [
+            'files' => $files,
+            'details' => $details,
+        ];
     }
+
 
     // -------------------------------------------------------------------------
     // 파일 탐색 및 캐싱

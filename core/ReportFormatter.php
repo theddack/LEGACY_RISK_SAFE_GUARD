@@ -88,6 +88,18 @@ class ReportFormatter
             $output .= "\n";
         }
 
+        if (!empty($m['db']['related_file_details'])) {
+            $output .= "연관 파일 상세(신뢰도):\n";
+            foreach ($m['db']['related_file_details'] as $item) {
+                $path = isset($item['path']) ? $item['path'] : '-';
+                $confidence = isset($item['confidence']) ? $item['confidence'] : 'UNKNOWN';
+                $score = isset($item['score']) ? $item['score'] : 0;
+                $sources = isset($item['sources']) ? implode(', ', $item['sources']) : '-';
+                $output .= "  - {$path} [{$confidence}] score={$score} sources={$sources}\n";
+            }
+            $output .= "\n";
+        }
+
         if (!empty($m['db']['same_table_users'])) {
             $output .= "동일 테이블 사용 파일:\n\n";
 
