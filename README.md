@@ -4,6 +4,7 @@
 [![Language](https://img.shields.io/badge/language-PHP-blue.svg)]
 [![Static Analysis](https://img.shields.io/badge/type-static--analysis-orange.svg)]
 
+A safety layer for AI-assisted maintenance on legacy systems.
 A static analysis tool that helps prevent risky AI-assisted modifications in legacy codebases.
 
 레거시 코드베이스에서 AI 기반 코드 수정 시 발생할 수 있는 위험을 줄이기 위한 정적 분석 도구입니다.
