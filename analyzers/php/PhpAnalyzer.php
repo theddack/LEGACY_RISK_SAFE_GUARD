@@ -11,6 +11,20 @@ class PhpAnalyzer
         $absolutePath = realpath($targetFile);
         $absoluteRoot = realpath($rootPath);
 
+        if ($absolutePath === false) {
+            throw new Exception("Invalid target path: " . $targetFile);
+        }
+
+        if ($absoluteRoot === false) {
+            throw new Exception("Invalid root path: " . $rootPath);
+        }
+
+        $normalizedRoot = rtrim(str_replace('\\', '/', $absoluteRoot), '/') . '/';
+        $normalizedTarget = str_replace('\\', '/', $absolutePath);
+        if (strpos($normalizedTarget, $normalizedRoot) !== 0) {
+            throw new Exception("Target file must be located under root path.");
+        }
+
         $loc = $this->calculateLoc($absolutePath);
 
         // 파일 전체 내용 읽기
@@ -24,8 +38,14 @@ class PhpAnalyzer
 
         $outboundCount = $this->calculateOutboundCount($cleanContent);
         $globalCount   = $this->calculateGlobalCount($cleanContent);
-        $queryCount    = $this->calculateQueryCount($cleanContent);
-        $tables        = $this->extractTables($cleanContent);
+        $resolvedTableVariables = $this->resolveTableVariables($cleanContent);
+        $tables        = $this->extractTables($cleanContent, $resolvedTableVariables);
+
+        $queryAnalysis = $this->extractQueryAnalysis($cleanContent, $resolvedTableVariables);
+        $queryCount = count($queryAnalysis['query_locations']);
+        $queryLocations = $queryAnalysis['query_locations'];
+        $tableQueryMap = $queryAnalysis['table_query_map'];
+        $queryTypeCounts = $queryAnalysis['query_type_counts'];
 
         // 스트리밍 방식: 파일을 한 번 순회하면서 inbound + same_table_users 동시 탐지
         // 13,000+ 파일을 메모리에 캐시하지 않고 한 번 읽고 바로 분석
@@ -49,6 +69,10 @@ class PhpAnalyzer
             );
         }
 
+        $relatedFilesAnalysis = $this->buildRelatedFiles($relativeInbound, $relativeSameTable);
+        $relatedFiles = $relatedFilesAnalysis['files'];
+        $relatedFileDetails = $relatedFilesAnalysis['details'];
+
         return [
             "schema_version" => "1.0",
             "target" => [
@@ -65,9 +89,14 @@ class PhpAnalyzer
                     "inbound_paths"  => $relativeInbound
                 ],
                 "db" => [
-                    "tables"           => $tables,
-                    "query_count"      => $queryCount,
-                    "same_table_users" => $relativeSameTable
+                    "tables"            => $tables,
+                    "query_count"       => $queryCount,
+                    "query_type_counts" => $queryTypeCounts,
+                    "query_locations"   => $queryLocations,
+                    "table_query_map"   => $tableQueryMap,
+                    "same_table_users"   => $relativeSameTable,
+                    "related_files"      => $relatedFiles,
+                    "related_file_details" => $relatedFileDetails
                 ],
                 "globals" => [
                     "count" => $globalCount
@@ -153,28 +182,25 @@ class PhpAnalyzer
         return count($matches[0]);
     }
 
-    /**
-     * SQL 쿼리 키워드 개수 계산 (주석 제거 후 content 사용)
-     */
-    private function calculateQueryCount($cleanContent)
-    {
-        preg_match_all('/\b(SELECT|INSERT|UPDATE|DELETE)\b/i', $cleanContent, $matches);
-        return count($matches[0]);
-    }
+
 
     /**
      * SQL 테이블 이름 추출 (주석 제거 후 content 사용)
      * JOIN 절, 백틱(`), DB.table 형식 대응
      *
-     * DB.table 형식 (예: JUVIS2.j2t_staff) 에서는 DB명을 건너뛰고
-     * 실제 테이블명(j2t_staff)만 추출한다.
+     * DB.table 형식 (예: ERP_MAIN.staff_table) 에서는 DB명을 건너뛰고
+     * 실제 테이블명(staff_table)만 추출한다.
+     *
+     * 추가로, PHP 변수에 담긴 테이블명도 추적한다.
+     * 예: $this->table_name = 'staff_table';
+     *     "SELECT * FROM {$this->table_name}";
      */
-    private function extractTables($cleanContent)
+    private function extractTables($cleanContent, array $resolvedTableVariables = [])
     {
         $tables = [];
 
         // 테이블명 패턴: 선택적 DB접두어(db.)를 건너뛰고 실제 테이블명만 캡처
-        // 예: JUVIS2.j2t_staff → j2t_staff, `orders` → orders
+        // 예: ERP_MAIN.staff_table → staff_table, `orders` → orders
         $tablePattern = '`?(?:[a-zA-Z0-9_]+\.)?`?`?([a-zA-Z0-9_]+)`?';
 
         $patterns = [
@@ -194,8 +220,308 @@ class PhpAnalyzer
             }
         }
 
+        // SQL 문자열에 직접 적히지 않은 변수 기반 테이블명도 보강 추출
+        if (!empty($resolvedTableVariables)) {
+            $tables = array_merge($tables, $this->extractTablesFromVariableReferences($cleanContent, $resolvedTableVariables));
+        }
+
         return array_values(array_unique($tables));
     }
+
+    /**
+     * 변수/프로퍼티에 담긴 테이블명 선언을 추출한다.
+     *
+     * 지원 예:
+     * - $table = 'orders';
+     * - $this->table_name = 'staff_table';
+     * - private $tableName = 'erp.users';
+     */
+    private function resolveTableVariables($cleanContent)
+    {
+        $resolved = [];
+
+        $assignmentPattern = '/(\$this->[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([\"\'`])([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)?)\2/i';
+        preg_match_all($assignmentPattern, $cleanContent, $matches, PREG_SET_ORDER);
+        foreach ($matches as $m) {
+            $resolved[$m[1]] = $this->normalizeTableName($m[3]);
+        }
+
+        $propertyPattern = '/\b(?:public|protected|private|var)\s+(\$[a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([\"\'`])([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)?)\2/i';
+        preg_match_all($propertyPattern, $cleanContent, $propMatches, PREG_SET_ORDER);
+        foreach ($propMatches as $m) {
+            $resolved[$m[1]] = $this->normalizeTableName($m[3]);
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * SQL 구문에서 변수 참조를 찾아 resolveTableVariables 결과와 매칭한다.
+     */
+    private function extractTablesFromVariableReferences($cleanContent, array $resolvedTableVariables)
+    {
+        $tables = [];
+
+        foreach ($resolvedTableVariables as $variableName => $tableName) {
+            $escapedVar = preg_quote($variableName, '/');
+
+            // 1) "FROM {$this->table_name}" 같은 직접 삽입 패턴
+            $directPattern = '/\b(?:FROM|JOIN|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+\{?\s*' . $escapedVar . '\s*\}?/i';
+
+            // 2) "FROM " . $this->table_name 같은 문자열 결합 패턴
+            $concatPattern = '/\b(?:FROM|JOIN|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b[^;\n]{0,80}\.\s*' . $escapedVar . '\b/i';
+
+            if (preg_match($directPattern, $cleanContent) || preg_match($concatPattern, $cleanContent)) {
+                $tables[] = $tableName;
+            }
+        }
+
+        return $tables;
+    }
+
+    /**
+     * DB.table 형태에서 table만 남기고 소문자로 정규화한다.
+     */
+    private function normalizeTableName($tableToken)
+    {
+        $parts = explode('.', strtolower($tableToken));
+        return end($parts);
+    }
+
+    /**
+     * SQL 라인 정보를 추출해 쿼리 타입/테이블 매핑까지 구성한다.
+     *
+     * 반환 구조:
+     * - query_locations: [{line, type, table, snippet}]
+     * - table_query_map: {table: [{line, type}]}
+     * - query_type_counts: {SELECT, INSERT, UPDATE, DELETE, read, write}
+     */
+    private function extractQueryAnalysis($cleanContent, array $resolvedTableVariables)
+    {
+        $locations = [];
+        $tableQueryMap = [];
+        $typeCounts = [
+            'SELECT' => 0,
+            'INSERT' => 0,
+            'UPDATE' => 0,
+            'DELETE' => 0,
+            'read' => 0,
+            'write' => 0,
+        ];
+
+        $lines = explode("\n", $cleanContent);
+
+        foreach ($lines as $idx => $line) {
+            $lineNo = $idx + 1;
+            $lineQueries = $this->extractSqlSegmentsFromLine($line);
+
+            foreach ($lineQueries as $queryText) {
+                $queryType = $this->detectQueryType($queryText);
+                if ($queryType === null) {
+                    continue;
+                }
+
+                $tableName = $this->extractTableFromQuery($queryType, $queryText, $resolvedTableVariables);
+
+                $typeCounts[$queryType]++;
+                if ($queryType === 'SELECT') {
+                    $typeCounts['read']++;
+                } else {
+                    $typeCounts['write']++;
+                }
+
+                $locations[] = [
+                    'line' => $lineNo,
+                    'type' => $queryType,
+                    'table' => $tableName,
+                    'snippet' => trim($line)
+                ];
+
+                if ($tableName !== null) {
+                    if (!isset($tableQueryMap[$tableName])) {
+                        $tableQueryMap[$tableName] = [];
+                    }
+                    $tableQueryMap[$tableName][] = [
+                        'line' => $lineNo,
+                        'type' => $queryType
+                    ];
+                }
+            }
+        }
+
+        foreach ($tableQueryMap as $table => $entries) {
+            $tableQueryMap[$table] = array_values(array_unique($entries, SORT_REGULAR));
+        }
+
+        return [
+            'query_locations' => $locations,
+            'table_query_map' => $tableQueryMap,
+            'query_type_counts' => $typeCounts,
+        ];
+    }
+
+    /**
+     * 한 줄에서 SQL 가능성이 있는 세그먼트를 추출한다.
+     */
+    private function extractSqlSegmentsFromLine($line)
+    {
+        $segments = [];
+
+        // 정규식 코드 자체는 SQL이 아니므로 제외 (휴리스틱 오탐 방지)
+        if (strpos($line, 'preg_match(') !== false || strpos($line, 'preg_match_all(') !== false) {
+            return $segments;
+        }
+
+        preg_match_all("/'([^']*)'|\"([^\"]*)\"|`([^`]*)`/", $line, $matches, PREG_SET_ORDER);
+        foreach ($matches as $m) {
+            $text = '';
+            if (isset($m[1]) && $m[1] !== '') {
+                $text = $m[1];
+            } elseif (isset($m[2]) && $m[2] !== '') {
+                $text = $m[2];
+            } elseif (isset($m[3]) && $m[3] !== '') {
+                $text = $m[3];
+            }
+
+            if ($this->looksLikeSqlStatement($text)) {
+                $segments[] = $text;
+            }
+        }
+
+
+        return $segments;
+    }
+
+    /**
+     * 일반 문자열과 SQL 구문을 구분하기 위한 간단한 휴리스틱.
+     */
+    private function looksLikeSqlStatement($text)
+    {
+        if (preg_match('/\bSELECT\b.*\bFROM\b/i', $text)) return true;
+        if (preg_match('/\bINSERT\b\s+\bINTO\b/i', $text)) return true;
+        if (preg_match('/\bUPDATE\b.*\bSET\b/i', $text)) return true;
+        if (preg_match('/\bDELETE\b\s+\bFROM\b/i', $text)) return true;
+
+        return false;
+    }
+
+    /**
+     * SQL 타입을 SELECT/INSERT/UPDATE/DELETE 중 하나로 판별한다.
+     */
+    private function detectQueryType($text)
+    {
+        if (preg_match('/\bSELECT\b/i', $text)) return 'SELECT';
+        if (preg_match('/\bINSERT\b/i', $text)) return 'INSERT';
+        if (preg_match('/\bUPDATE\b/i', $text)) return 'UPDATE';
+        if (preg_match('/\bDELETE\b/i', $text)) return 'DELETE';
+
+        return null;
+    }
+
+    /**
+     * 쿼리 타입에 맞는 테이블명을 SQL/변수 참조에서 추출한다.
+     */
+    private function extractTableFromQuery($queryType, $queryText, array $resolvedTableVariables)
+    {
+        if ($queryType === 'SELECT') {
+            if (preg_match('/\bFROM\s+`?(?:[a-zA-Z0-9_]+\.)?`?([a-zA-Z0-9_]+)\b/i', $queryText, $m)) {
+                return strtolower($m[1]);
+            }
+            if (preg_match('/\bFROM\s+\{?\s*(\$this->[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_][a-zA-Z0-9_]*)\s*\}?/i', $queryText, $m)) {
+                return isset($resolvedTableVariables[$m[1]]) ? $resolvedTableVariables[$m[1]] : null;
+            }
+            return null;
+        }
+
+        if ($queryType === 'INSERT') {
+            if (preg_match('/\bINSERT\s+INTO\s+`?(?:[a-zA-Z0-9_]+\.)?`?([a-zA-Z0-9_]+)\b/i', $queryText, $m)) {
+                return strtolower($m[1]);
+            }
+            if (preg_match('/\bINSERT\s+INTO\s+\{?\s*(\$this->[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_][a-zA-Z0-9_]*)\s*\}?/i', $queryText, $m)) {
+                return isset($resolvedTableVariables[$m[1]]) ? $resolvedTableVariables[$m[1]] : null;
+            }
+            return null;
+        }
+
+        if ($queryType === 'UPDATE') {
+            if (preg_match('/\bUPDATE\s+`?(?:[a-zA-Z0-9_]+\.)?`?([a-zA-Z0-9_]+)\b/i', $queryText, $m)) {
+                return strtolower($m[1]);
+            }
+            if (preg_match('/\bUPDATE\s+\{?\s*(\$this->[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_][a-zA-Z0-9_]*)\s*\}?/i', $queryText, $m)) {
+                return isset($resolvedTableVariables[$m[1]]) ? $resolvedTableVariables[$m[1]] : null;
+            }
+            return null;
+        }
+
+        if ($queryType === 'DELETE') {
+            if (preg_match('/\bDELETE\s+FROM\s+`?(?:[a-zA-Z0-9_]+\.)?`?([a-zA-Z0-9_]+)\b/i', $queryText, $m)) {
+                return strtolower($m[1]);
+            }
+            if (preg_match('/\bDELETE\s+FROM\s+\{?\s*(\$this->[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_][a-zA-Z0-9_]*)\s*\}?/i', $queryText, $m)) {
+                return isset($resolvedTableVariables[$m[1]]) ? $resolvedTableVariables[$m[1]] : null;
+            }
+            return null;
+        }
+
+        return null;
+    }
+
+    /**
+     * inbound + same-table 정보를 묶어 related_files를 추론한다.
+     * 각 파일에 대해 source/score를 함께 제공해 신뢰도 기반 탐색이 가능하다.
+     */
+    private function buildRelatedFiles(array $relativeInbound, array $relativeSameTable)
+    {
+        $scores = [];
+
+        foreach ($relativeInbound as $file) {
+            if (!isset($scores[$file])) {
+                $scores[$file] = ['path' => $file, 'score' => 0, 'sources' => []];
+            }
+            $scores[$file]['score'] += 3;
+            $scores[$file]['sources']['inbound'] = true;
+        }
+
+        foreach ($relativeSameTable as $table => $files) {
+            foreach ($files as $file) {
+                if (!isset($scores[$file])) {
+                    $scores[$file] = ['path' => $file, 'score' => 0, 'sources' => []];
+                }
+                $scores[$file]['score'] += 1;
+                $scores[$file]['sources']['same_table:' . $table] = true;
+            }
+        }
+
+        $details = array_values($scores);
+        usort($details, function ($a, $b) {
+            if ($a['score'] === $b['score']) {
+                return strcmp($a['path'], $b['path']);
+            }
+            return $b['score'] - $a['score'];
+        });
+
+        foreach ($details as &$item) {
+            $item['sources'] = array_values(array_keys($item['sources']));
+            if ($item['score'] >= 3) {
+                $item['confidence'] = 'HIGH';
+            } elseif ($item['score'] >= 2) {
+                $item['confidence'] = 'MEDIUM';
+            } else {
+                $item['confidence'] = 'LOW';
+            }
+        }
+        unset($item);
+
+        $files = array_map(function ($item) {
+            return $item['path'];
+        }, $details);
+
+        return [
+            'files' => $files,
+            'details' => $details,
+        ];
+    }
+
 
     // -------------------------------------------------------------------------
     // 파일 탐색 및 캐싱
@@ -259,12 +585,16 @@ class PhpAnalyzer
         // --- 1단계: grep으로 후보 파일 추출 ---
 
         // inbound 후보: targetBasename을 포함하는 PHP 파일
-        $inboundCandidates = $this->grepFiles($rootPath, $targetBasename);
+        $inboundGrepPattern = preg_quote($targetBasename, '/');
+        $inboundCandidates = $this->grepFiles($rootPath, $inboundGrepPattern);
 
         // same_table 후보: 테이블명 중 하나라도 포함하는 PHP 파일
         $tableCandidates = [];
         if (!empty($tables)) {
-            $tableGrepPattern = implode('\\|', array_map('escapeshellcmd', $tables));
+            $escapedTables = array_map(function($table) {
+                return preg_quote($table, '/');
+            }, $tables);
+            $tableGrepPattern = implode('|', $escapedTables);
             $tableCandidates = $this->grepFiles($rootPath, $tableGrepPattern);
         }
 
@@ -281,7 +611,10 @@ class PhpAnalyzer
                 continue;
             }
 
-            preg_match_all('/\b(?:include|require|include_once|require_once)\b\s*[(\s]*[\'"]([^\'"]+)[\'"]/i', $content, $matches);
+            // 주석 내부 include/require 문자열에 의한 오탐 방지
+            $cleanContent = $this->stripCommentsOnly($content);
+
+            preg_match_all('/\b(?:include|require|include_once|require_once)\b\s*[(\s]*[\'"]([^\'"]+)[\'"]/i', $cleanContent, $matches);
 
             if (empty($matches[1])) {
                 continue;
@@ -321,7 +654,11 @@ class PhpAnalyzer
                     continue;
                 }
 
-                if (preg_match_all($tablePattern, $content, $tMatches)) {
+                // 대상 파일 분석과 동일하게 주석을 제거해
+                // 주석 내부 테이블명으로 인한 오탐을 줄인다.
+                $cleanContent = $this->stripCommentsOnly($content);
+
+                if (preg_match_all($tablePattern, $cleanContent, $tMatches)) {
                     $found = array_unique(array_map('strtolower', $tMatches[1]));
                     foreach ($found as $table) {
                         if (isset($sameTableUsers[$table])) {
@@ -344,9 +681,19 @@ class PhpAnalyzer
      */
     private function grepFiles($rootPath, $pattern)
     {
+        if ($pattern === '') {
+            return [];
+        }
+
+        $excludeDirs = ['.git', 'vendor', 'node_modules', '.svn', '.claude'];
+        $excludeArgs = implode(' ', array_map(function($dir) {
+            return '--exclude-dir=' . escapeshellarg($dir);
+        }, $excludeDirs));
+
         $cmd = sprintf(
-            'grep -rl --include="*.php" %s %s 2>/dev/null',
+            'grep -E -rl --include="*.php" %s %s %s 2>/dev/null',
             escapeshellarg($pattern),
+            $excludeArgs,
             escapeshellarg($rootPath)
         );
 

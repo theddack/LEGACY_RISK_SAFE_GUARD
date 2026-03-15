@@ -11,13 +11,31 @@ class RiskCalculator
         $weights = require __DIR__ . '/../config/risk_weights.php';
 
         $m = $ir['metrics'];
+        $q = isset($m['db']['query_type_counts']) ? $m['db']['query_type_counts'] : [];
+
+        $readCount = isset($q['read']) ? $q['read'] : 0;
+        $writeCount = isset($q['write']) ? $q['write'] : 0;
+        $legacyQueryCount = isset($m['db']['query_count']) ? $m['db']['query_count'] : 0;
+
+        // query_type_counts 미지원 구버전 analyzer 대응
+        $baseQueryScore = 0;
+        if ($readCount === 0 && $writeCount === 0) {
+            $baseQueryScore = $legacyQueryCount * $weights['query'];
+        }
+
+        $tableCount = isset($m['db']['tables']) ? count($m['db']['tables']) : 0;
+        $relatedFileCount = isset($m['db']['related_files']) ? count($m['db']['related_files']) : 0;
 
         $score =
             ($m['dependency']['inbound_count'] * $weights['inbound']) +
             ($m['dependency']['outbound_count'] * $weights['outbound']) +
-            ($m['db']['query_count'] * $weights['query']) +
+            $baseQueryScore +
+            ($readCount * $weights['query_read']) +
+            ($writeCount * $weights['query_write']) +
             ($m['complexity']['loc'] * $weights['loc']) +
-            ($m['globals']['count'] * $weights['globals']);
+            ($m['globals']['count'] * $weights['globals']) +
+            ($tableCount * $weights['table_count']) +
+            ($relatedFileCount * $weights['related_file']);
 
         return [
             "risk_score" => round($score, 2),

@@ -36,10 +36,66 @@ class ReportFormatter
         $output .= "----------------------------------------\n";
         $output .= "[DB 영향]\n\n";
 
+        if (!empty($m['db']['query_type_counts'])) {
+            $q = $m['db']['query_type_counts'];
+            $output .= "쿼리 타입 요약:\n";
+            $output .= "  - READ(SELECT): " . (isset($q['read']) ? $q['read'] : 0) . "\n";
+            $output .= "  - WRITE(INSERT/UPDATE/DELETE): " . (isset($q['write']) ? $q['write'] : 0) . "\n";
+            $output .= "  - SELECT: " . (isset($q['SELECT']) ? $q['SELECT'] : 0) . "\n";
+            $output .= "  - INSERT: " . (isset($q['INSERT']) ? $q['INSERT'] : 0) . "\n";
+            $output .= "  - UPDATE: " . (isset($q['UPDATE']) ? $q['UPDATE'] : 0) . "\n";
+            $output .= "  - DELETE: " . (isset($q['DELETE']) ? $q['DELETE'] : 0) . "\n\n";
+        }
+
         if (!empty($m['db']['tables'])) {
             $output .= "사용 테이블:\n";
             foreach ($m['db']['tables'] as $table) {
                 $output .= "  - {$table}\n";
+            }
+            $output .= "\n";
+        }
+
+        if (!empty($m['db']['query_locations'])) {
+            $output .= "쿼리 위치(대상 파일):\n";
+            foreach ($m['db']['query_locations'] as $loc) {
+                $line = isset($loc['line']) ? $loc['line'] : '?';
+                $type = isset($loc['type']) ? $loc['type'] : 'UNKNOWN';
+                $table = isset($loc['table']) && $loc['table'] !== null ? $loc['table'] : '-';
+                $snippet = isset($loc['snippet']) ? $loc['snippet'] : '';
+                $output .= "  - L{$line} [{$type}] (table: {$table}) {$snippet}\n";
+            }
+            $output .= "\n";
+        }
+
+        if (!empty($m['db']['table_query_map'])) {
+            $output .= "테이블별 쿼리 맵:\n";
+            foreach ($m['db']['table_query_map'] as $table => $entries) {
+                $output .= "  - {$table}:\n";
+                foreach ($entries as $entry) {
+                    $line = isset($entry['line']) ? $entry['line'] : '?';
+                    $type = isset($entry['type']) ? $entry['type'] : 'UNKNOWN';
+                    $output .= "      * L{$line} [{$type}]\n";
+                }
+            }
+            $output .= "\n";
+        }
+
+        if (!empty($m['db']['related_files'])) {
+            $output .= "연관 파일(자동 추론):\n";
+            foreach ($m['db']['related_files'] as $file) {
+                $output .= "  - {$file}\n";
+            }
+            $output .= "\n";
+        }
+
+        if (!empty($m['db']['related_file_details'])) {
+            $output .= "연관 파일 상세(신뢰도):\n";
+            foreach ($m['db']['related_file_details'] as $item) {
+                $path = isset($item['path']) ? $item['path'] : '-';
+                $confidence = isset($item['confidence']) ? $item['confidence'] : 'UNKNOWN';
+                $score = isset($item['score']) ? $item['score'] : 0;
+                $sources = isset($item['sources']) ? implode(', ', $item['sources']) : '-';
+                $output .= "  - {$path} [{$confidence}] score={$score} sources={$sources}\n";
             }
             $output .= "\n";
         }
