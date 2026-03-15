@@ -166,15 +166,19 @@ class PhpAnalyzer
      * SQL 테이블 이름 추출 (주석 제거 후 content 사용)
      * JOIN 절, 백틱(`), DB.table 형식 대응
      *
-     * DB.table 형식 (예: JUVIS2.j2t_staff) 에서는 DB명을 건너뛰고
-     * 실제 테이블명(j2t_staff)만 추출한다.
+     * DB.table 형식 (예: ERP_MAIN.staff_table) 에서는 DB명을 건너뛰고
+     * 실제 테이블명(staff_table)만 추출한다.
+     *
+     * 추가로, PHP 변수에 담긴 테이블명도 추적한다.
+     * 예: $this->table_name = 'staff_table';
+     *     "SELECT * FROM {$this->table_name}";
      */
     private function extractTables($cleanContent)
     {
         $tables = [];
 
         // 테이블명 패턴: 선택적 DB접두어(db.)를 건너뛰고 실제 테이블명만 캡처
-        // 예: JUVIS2.j2t_staff → j2t_staff, `orders` → orders
+        // 예: ERP_MAIN.staff_table → staff_table, `orders` → orders
         $tablePattern = '`?(?:[a-zA-Z0-9_]+\.)?`?`?([a-zA-Z0-9_]+)`?';
 
         $patterns = [
@@ -194,7 +198,73 @@ class PhpAnalyzer
             }
         }
 
+        // SQL 문자열에 직접 적히지 않은 변수 기반 테이블명도 보강 추출
+        $resolvedTableVariables = $this->resolveTableVariables($cleanContent);
+        if (!empty($resolvedTableVariables)) {
+            $tables = array_merge($tables, $this->extractTablesFromVariableReferences($cleanContent, $resolvedTableVariables));
+        }
+
         return array_values(array_unique($tables));
+    }
+
+    /**
+     * 변수/프로퍼티에 담긴 테이블명 선언을 추출한다.
+     *
+     * 지원 예:
+     * - $table = 'orders';
+     * - $this->table_name = 'staff_table';
+     * - private $tableName = 'erp.users';
+     */
+    private function resolveTableVariables($cleanContent)
+    {
+        $resolved = [];
+
+        $assignmentPattern = '/\b(\$this->[a-zA-Z_][a-zA-Z0-9_]*|\$[a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*[\"\'`]([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)?)\2/i';
+        preg_match_all($assignmentPattern, $cleanContent, $matches, PREG_SET_ORDER);
+        foreach ($matches as $m) {
+            $resolved[$m[1]] = $this->normalizeTableName($m[3]);
+        }
+
+        $propertyPattern = '/\b(?:public|protected|private|var)\s+(\$[a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*[\"\'`]([a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)?)\2/i';
+        preg_match_all($propertyPattern, $cleanContent, $propMatches, PREG_SET_ORDER);
+        foreach ($propMatches as $m) {
+            $resolved[$m[1]] = $this->normalizeTableName($m[3]);
+        }
+
+        return $resolved;
+    }
+
+    /**
+     * SQL 구문에서 변수 참조를 찾아 resolveTableVariables 결과와 매칭한다.
+     */
+    private function extractTablesFromVariableReferences($cleanContent, array $resolvedTableVariables)
+    {
+        $tables = [];
+
+        foreach ($resolvedTableVariables as $variableName => $tableName) {
+            $escapedVar = preg_quote($variableName, '/');
+
+            // 1) "FROM {$this->table_name}" 같은 직접 삽입 패턴
+            $directPattern = '/\b(?:FROM|JOIN|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+\{?\s*' . $escapedVar . '\s*\}?/i';
+
+            // 2) "FROM " . $this->table_name 같은 문자열 결합 패턴
+            $concatPattern = '/\b(?:FROM|JOIN|INSERT\s+INTO|UPDATE|DELETE\s+FROM)\b[^;\n]{0,80}\.\s*' . $escapedVar . '\b/i';
+
+            if (preg_match($directPattern, $cleanContent) || preg_match($concatPattern, $cleanContent)) {
+                $tables[] = $tableName;
+            }
+        }
+
+        return $tables;
+    }
+
+    /**
+     * DB.table 형태에서 table만 남기고 소문자로 정규화한다.
+     */
+    private function normalizeTableName($tableToken)
+    {
+        $parts = explode('.', strtolower($tableToken));
+        return end($parts);
     }
 
     // -------------------------------------------------------------------------
