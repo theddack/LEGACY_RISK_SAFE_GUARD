@@ -259,12 +259,16 @@ class PhpAnalyzer
         // --- 1단계: grep으로 후보 파일 추출 ---
 
         // inbound 후보: targetBasename을 포함하는 PHP 파일
-        $inboundCandidates = $this->grepFiles($rootPath, $targetBasename);
+        $inboundGrepPattern = preg_quote($targetBasename, '/');
+        $inboundCandidates = $this->grepFiles($rootPath, $inboundGrepPattern);
 
         // same_table 후보: 테이블명 중 하나라도 포함하는 PHP 파일
         $tableCandidates = [];
         if (!empty($tables)) {
-            $tableGrepPattern = implode('\\|', array_map('escapeshellcmd', $tables));
+            $escapedTables = array_map(function($table) {
+                return preg_quote($table, '/');
+            }, $tables);
+            $tableGrepPattern = implode('|', $escapedTables);
             $tableCandidates = $this->grepFiles($rootPath, $tableGrepPattern);
         }
 
@@ -321,7 +325,11 @@ class PhpAnalyzer
                     continue;
                 }
 
-                if (preg_match_all($tablePattern, $content, $tMatches)) {
+                // 대상 파일 분석과 동일하게 주석을 제거해
+                // 주석 내부 테이블명으로 인한 오탐을 줄인다.
+                $cleanContent = $this->stripCommentsOnly($content);
+
+                if (preg_match_all($tablePattern, $cleanContent, $tMatches)) {
                     $found = array_unique(array_map('strtolower', $tMatches[1]));
                     foreach ($found as $table) {
                         if (isset($sameTableUsers[$table])) {
@@ -344,9 +352,19 @@ class PhpAnalyzer
      */
     private function grepFiles($rootPath, $pattern)
     {
+        if ($pattern === '') {
+            return [];
+        }
+
+        $excludeDirs = ['.git', 'vendor', 'node_modules', '.svn', '.claude'];
+        $excludeArgs = implode(' ', array_map(function($dir) {
+            return '--exclude-dir=' . escapeshellarg($dir);
+        }, $excludeDirs));
+
         $cmd = sprintf(
-            'grep -rl --include="*.php" %s %s 2>/dev/null',
+            'grep -E -rl --include="*.php" %s %s %s 2>/dev/null',
             escapeshellarg($pattern),
+            $excludeArgs,
             escapeshellarg($rootPath)
         );
 
