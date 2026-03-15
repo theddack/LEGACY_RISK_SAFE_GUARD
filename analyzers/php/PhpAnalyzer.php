@@ -11,6 +11,20 @@ class PhpAnalyzer
         $absolutePath = realpath($targetFile);
         $absoluteRoot = realpath($rootPath);
 
+        if ($absolutePath === false) {
+            throw new Exception("Invalid target path: " . $targetFile);
+        }
+
+        if ($absoluteRoot === false) {
+            throw new Exception("Invalid root path: " . $rootPath);
+        }
+
+        $normalizedRoot = rtrim(str_replace('\\', '/', $absoluteRoot), '/') . '/';
+        $normalizedTarget = str_replace('\\', '/', $absolutePath);
+        if (strpos($normalizedTarget, $normalizedRoot) !== 0) {
+            throw new Exception("Target file must be located under root path.");
+        }
+
         $loc = $this->calculateLoc($absolutePath);
 
         // 파일 전체 내용 읽기
@@ -26,6 +40,7 @@ class PhpAnalyzer
         $globalCount   = $this->calculateGlobalCount($cleanContent);
         $queryCount    = $this->calculateQueryCount($cleanContent);
         $tables        = $this->extractTables($cleanContent);
+        $queryLocations = $this->extractQueryLocations($cleanContent);
 
         // 스트리밍 방식: 파일을 한 번 순회하면서 inbound + same_table_users 동시 탐지
         // 13,000+ 파일을 메모리에 캐시하지 않고 한 번 읽고 바로 분석
@@ -67,6 +82,7 @@ class PhpAnalyzer
                 "db" => [
                     "tables"           => $tables,
                     "query_count"      => $queryCount,
+                    "query_locations"  => $queryLocations,
                     "same_table_users" => $relativeSameTable
                 ],
                 "globals" => [
@@ -267,6 +283,31 @@ class PhpAnalyzer
         return end($parts);
     }
 
+    /**
+     * SQL 키워드가 등장하는 라인 번호를 추출한다.
+     * 외부에서 파일/폴더 기준으로 검색 가능한 위치 정보 제공 목적.
+     */
+    private function extractQueryLocations($cleanContent)
+    {
+        $locations = [];
+        $lines = explode("\n", $cleanContent);
+
+        foreach ($lines as $idx => $line) {
+            // 코드 내부 정규식/로직이 아닌 SQL 문자열에 가까운 라인만 추린다.
+            $hasSqlKeyword = preg_match('/\b(SELECT|INSERT|UPDATE|DELETE)\b/i', $line);
+            $looksLikeSqlLiteral = preg_match('/[\'"`].*\b(?:SELECT|INSERT|UPDATE|DELETE)\b/i', $line);
+
+            if ($hasSqlKeyword && $looksLikeSqlLiteral) {
+                $locations[] = [
+                    'line' => $idx + 1,
+                    'snippet' => trim($line)
+                ];
+            }
+        }
+
+        return $locations;
+    }
+
     // -------------------------------------------------------------------------
     // 파일 탐색 및 캐싱
     // -------------------------------------------------------------------------
@@ -355,7 +396,10 @@ class PhpAnalyzer
                 continue;
             }
 
-            preg_match_all('/\b(?:include|require|include_once|require_once)\b\s*[(\s]*[\'"]([^\'"]+)[\'"]/i', $content, $matches);
+            // 주석 내부 include/require 문자열에 의한 오탐 방지
+            $cleanContent = $this->stripCommentsOnly($content);
+
+            preg_match_all('/\b(?:include|require|include_once|require_once)\b\s*[(\s]*[\'"]([^\'"]+)[\'"]/i', $cleanContent, $matches);
 
             if (empty($matches[1])) {
                 continue;

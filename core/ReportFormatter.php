@@ -44,6 +44,16 @@ class ReportFormatter
             $output .= "\n";
         }
 
+        if (!empty($m['db']['query_locations'])) {
+            $output .= "쿼리 위치(대상 파일):\n";
+            foreach ($m['db']['query_locations'] as $loc) {
+                $line = isset($loc['line']) ? $loc['line'] : '?';
+                $snippet = isset($loc['snippet']) ? $loc['snippet'] : '';
+                $output .= "  - L{$line}: {$snippet}\n";
+            }
+            $output .= "\n";
+        }
+
         if (!empty($m['db']['same_table_users'])) {
             $output .= "동일 테이블 사용 파일:\n\n";
 
